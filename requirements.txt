@@ -1,0 +1,25 @@
+# ── Core AI / Vision ─────────────────────────────
+ultralytics>=8.0.0          # YOLOv8 face detection
+insightface>=0.7.3          # ArcFace embeddings + attributes
+onnxruntime>=1.16.0         # InsightFace backend (CPU)
+# onnxruntime-gpu>=1.16.0   # Uncomment for GPU
+
+# ── Tracking ─────────────────────────────────────
+deep-sort-realtime>=1.3.2   # DeepSort multi-object tracker
+opencv-python>=4.8.0        # Video capture, image ops, annotation
+
+# ── Database ─────────────────────────────────────
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9      # PostgreSQL driver
+
+# ── API ──────────────────────────────────────────
+flask>=3.0.0
+flask-cors>=4.0.0
+flask-socketio>=5.3.6
+python-socketio>=5.10.0
+eventlet>=0.35.1            # async mode for SocketIO
+
+# ── Utilities ────────────────────────────────────
+numpy>=1.24.0
+Pillow>=10.0.0
+python-dateutil>=2.8.2

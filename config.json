@@ -1,0 +1,56 @@
+{
+  "video_source": "sample_video.mp4",
+  "rtsp_url": "rtsp://your-camera-ip:554/stream",
+  "use_rtsp": false,
+
+  "detection": {
+    "model_path": "yolov8n.pt",
+    "confidence_threshold": 0.5,
+    "frame_skip": 2,
+    "input_size": 640
+  },
+
+  "recognition": {
+    "model_name": "buffalo_l",
+    "similarity_threshold": 0.45,
+    "embedding_size": 512
+  },
+
+  "tracking": {
+    "max_age": 30,
+    "min_hits": 3,
+    "iou_threshold": 0.3
+  },
+
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "face_tracker",
+    "user": "postgres",
+    "password": "Raksha16@postgresql"
+  },
+
+  "logging": {
+    "log_file": "logs/events.log",
+    "image_base_dir": "logs",
+    "log_level": "INFO"
+  },
+
+  "alerts": {
+    "crowd_threshold": 10,
+    "loitering_seconds": 30,
+    "watchlist_enabled": true
+  },
+
+  "output": {
+    "annotated_video": true,
+    "output_video_path": "logs/annotated_output.mp4",
+    "show_live_window": false
+  },
+
+  "api": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "secret_key": "change-me-in-production"
+  }
+}
