@@ -54,3 +54,47 @@ body {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.5; transform: scale(1.3); }
 }
+
+/* ── Light mode ───────────────────────────────── */
+[data-theme="light"] {
+  --bg-primary: #f1f5f9;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --border: #e2e8f0;
+  --text-primary: #1e293b;
+  --text-muted: #64748b;
+}
+
+.light-mode {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.light-mode .sidebar {
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+}
+
+.light-mode .card {
+  background: var(--bg-card);
+  border-color: var(--border);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+.light-mode .nav-item {
+  color: var(--text-muted);
+}
+
+.light-mode .nav-item:hover {
+  background: rgba(0,0,0,0.05);
+  color: var(--text-primary);
+}
+
+.light-mode .nav-item.active {
+  background: rgba(59,130,246,0.1);
+  color: var(--accent-blue);
+}
+
+.light-mode table th, .light-mode table td {
+  border-color: var(--border);
+}

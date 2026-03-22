@@ -146,7 +146,8 @@ class FSLogger:
             placeholder = np.zeros((64, 64, 3), dtype=np.uint8)
             cv2.imwrite(str(full_path), placeholder)
 
-        return str(full_path)
+        # Always use forward slashes so browser URLs work on Windows too
+        return str(full_path).replace('\\', '/')
 
     def close(self):
         self._event_logger.info("=== Face Tracker Session Ended ===")

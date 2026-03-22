@@ -23,9 +23,15 @@ export default function FaceGallery() {
 
   const toggleWatchlist = async (face) => {
     try {
+      const removing = face.is_watchlist;
       await axios.post(`/api/watchlist/${face.face_uuid}`, {
-        label: face.label || 'Watchlist',
+        label: removing ? '' : (face.label || 'Watchlist'),
+        remove: removing,
       });
+      // Update selectedFace immediately so modal button toggles right away
+      if (selectedFace && selectedFace.face_uuid === face.face_uuid) {
+        setSelectedFace(prev => ({ ...prev, is_watchlist: !removing, label: removing ? '' : 'Watchlist' }));
+      }
       fetchFaces();
     } catch (e) {}
   };
@@ -73,7 +79,7 @@ export default function FaceGallery() {
             {face.thumbnail_path ? (
               <img
                 className="face-avatar"
-                src={`/logs/${face.thumbnail_path.split('/logs/')[1] || face.thumbnail_path}`}
+                src={`/logs/${face.thumbnail_path.replace(/\\/g, '/').replace(/.*logs\//, '')}`}
                 alt="face"
                 onError={e => { e.target.style.display = 'none'; }}
               />
@@ -145,10 +151,21 @@ function FaceModal({ face, onClose, onToggleWatchlist }) {
         </div>
 
         <div style={{ display: 'flex', gap: 20, marginBottom: 20 }}>
-          <div style={{
-            width: 80, height: 80, borderRadius: 12, background: 'var(--bg-secondary)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, flexShrink: 0,
-          }}>👤</div>
+          <div style={{ width: 80, height: 80, borderRadius: 12, flexShrink: 0,
+            background: 'var(--bg-secondary)', overflow: 'hidden',
+            display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {face.thumbnail_path ? (
+              <img
+                src={`/logs/${face.thumbnail_path.replace(/\\/g, '/').replace(/.*logs\//, '')}`}
+                alt="face"
+                style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 12 }}
+                onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+              />
+            ) : null}
+            <div style={{ display: face.thumbnail_path ? 'none' : 'flex',
+              width: 80, height: 80, alignItems: 'center', justifyContent: 'center',
+              fontSize: 32, borderRadius: 12, background: 'var(--bg-secondary)' }}>👤</div>
+          </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>{face.face_uuid}</div>
             <div style={{ fontSize: 13, marginBottom: 4 }}>

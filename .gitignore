@@ -1,19 +1,18 @@
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
+*.pyc
+*.pyo
 *.egg-info/
 .env
 venv/
 .venv/
 
-# Models (large files)
+# Models (large files — download separately)
 *.pt
 *.onnx
 *.pkl
-
-# Logs and outputs
-logs/
-*.log
 
 # Node
 frontend/node_modules/
@@ -30,8 +29,21 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+*.code-workspace
 
-# Video files
+# Video files (too large for GitHub)
 *.mp4
 *.avi
 *.mov
+*.mkv
+*.webm
+
+# Uploaded videos (runtime generated)
+uploads/
+
+# Annotated output video (large)
+logs/annotated_output.mp4
+
+# Keep logs/entries, logs/exits, logs/thumbnails, logs/events.log
+# but ignore pycache anywhere inside logs
+logs/**/__pycache__/

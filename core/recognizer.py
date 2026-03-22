@@ -176,14 +176,14 @@ class FaceRecognizer:
         except Exception as exc:
             logger.error(f"DB update error for {face_uuid}: {exc}")
 
-    def mark_watchlist(self, face_uuid: str, label: str = ""):
-        """Mark a face as part of the watchlist."""
+    def mark_watchlist(self, face_uuid: str, label: str = "", remove: bool = False):
+        """Toggle a face on/off the watchlist."""
         try:
             with session_scope() as session:
                 face = session.query(Face).filter_by(face_uuid=face_uuid).first()
                 if face:
-                    face.is_watchlist = True
-                    face.label = label
+                    face.is_watchlist = not remove
+                    face.label = label if not remove else ""
         except Exception as exc:
             logger.error(f"Watchlist update error: {exc}")
 

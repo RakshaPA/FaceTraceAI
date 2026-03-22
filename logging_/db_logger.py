@@ -2,12 +2,14 @@
 logging_/db_logger.py
 PostgreSQL event logger.
 
-Writes FaceEvent, DwellRecord, SystemAlert, and VisitorStats rows.
-All writes are wrapped in try/except so a DB hiccup never crashes
-the video processing loop.
+Fixes vs v1:
+  - _upsert_hourly_stats: strip timezone from datetime before DB write
+  - _upsert_hourly_stats: now increments unique_visitors correctly
+  - log_entry / log_exit: pass new_unique flag when it's a first-time face
+  - datetime.utcnow() replaced with datetime.now(timezone.utc)
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from db.session import session_scope
@@ -17,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 class DBLogger:
-    """Handles all PostgreSQL writes for the face tracker."""
 
     # ------------------------------------------------------------------
     # Event logging
@@ -32,9 +33,10 @@ class DBLogger:
         frame_number: int,
         bbox: Optional[tuple] = None,
         timestamp: Optional[datetime] = None,
+        is_new_face: bool = False,
     ) -> Optional[int]:
         """Insert an entry FaceEvent row. Returns the new row ID."""
-        ts = timestamp or datetime.utcnow()
+        ts = timestamp or datetime.now(timezone.utc)
         try:
             with session_scope() as session:
                 face = session.query(Face).filter_by(face_uuid=face_uuid).first()
@@ -57,7 +59,7 @@ class DBLogger:
                 session.flush()
                 event_id = event.id
 
-            self._upsert_hourly_stats(ts, entries_delta=1)
+            self._upsert_hourly_stats(ts, entries_delta=1, new_unique=is_new_face)
             return event_id
         except Exception as exc:
             logger.error(f"DB log_entry error: {exc}")
@@ -74,7 +76,7 @@ class DBLogger:
         timestamp: Optional[datetime] = None,
     ) -> Optional[int]:
         """Insert an exit FaceEvent and a DwellRecord."""
-        ts = timestamp or datetime.utcnow()
+        ts = timestamp or datetime.now(timezone.utc)
         try:
             with session_scope() as session:
                 face = session.query(Face).filter_by(face_uuid=face_uuid).first()
@@ -93,7 +95,6 @@ class DBLogger:
                 )
                 session.add(event)
 
-                # Count existing dwell records for session numbering
                 session_no = (
                     session.query(DwellRecord)
                     .filter_by(face_uuid=face_uuid)
@@ -132,7 +133,7 @@ class DBLogger:
                     alert_type=alert_type,
                     severity=severity,
                     message=message,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     face_uuid=face_uuid,
                     extra=extra or {},
                 )
@@ -200,8 +201,8 @@ class DBLogger:
 
     def get_hourly_stats(self, hours: int = 24) -> list:
         try:
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
             with session_scope() as session:
-                cutoff = datetime.utcnow() - timedelta(hours=hours)
                 rows = (
                     session.query(VisitorStats)
                     .filter(VisitorStats.hour_bucket >= cutoff)
@@ -250,7 +251,6 @@ class DBLogger:
             return []
 
     def get_dwell_stats(self) -> dict:
-        """Return average, min, max dwell time across all sessions."""
         try:
             with session_scope() as session:
                 records = session.query(DwellRecord).filter(
@@ -279,10 +279,14 @@ class DBLogger:
         entries_delta: int = 0,
         exits_delta: int = 0,
         dwell: Optional[float] = None,
+        new_unique: bool = False,
     ):
         """Upsert the VisitorStats row for the current hour bucket."""
         try:
-            bucket = ts.replace(minute=0, second=0, microsecond=0)
+            # Strip timezone — PostgreSQL TIMESTAMP WITHOUT TIME ZONE column
+            ts_naive = ts.replace(tzinfo=None) if ts.tzinfo else ts
+            bucket = ts_naive.replace(minute=0, second=0, microsecond=0)
+
             with session_scope() as session:
                 row = session.query(VisitorStats).filter_by(hour_bucket=bucket).first()
                 if row is None:
@@ -295,11 +299,18 @@ class DBLogger:
                         peak_concurrent=0,
                     )
                     session.add(row)
+
                 row.total_entries = (row.total_entries or 0) + entries_delta
                 row.total_exits = (row.total_exits or 0) + exits_delta
+
+                # Only increment unique_visitors when a brand new face is registered
+                if new_unique:
+                    row.unique_visitors = (row.unique_visitors or 0) + 1
+
                 if dwell is not None:
                     prev_avg = row.avg_dwell_seconds or 0.0
-                    prev_count = row.total_exits or 1
+                    prev_count = max(row.total_exits or 1, 1)
                     row.avg_dwell_seconds = (prev_avg * (prev_count - 1) + dwell) / prev_count
+
         except Exception as exc:
             logger.error(f"_upsert_hourly_stats error: {exc}")

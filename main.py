@@ -21,7 +21,10 @@ from typing import Dict, Optional
 import cv2
 import numpy as np
 
+from core.multi_camera import MultiCameraManager, CameraConfig
 from core.detector import FaceDetector
+from core.adaptive_skip import AdaptiveFrameSkipper
+from core.multi_camera import MultiCameraManager
 from core.embedder import FaceEmbedder
 from core.event_router import EventRouter
 from core.recognizer import FaceRecognizer
@@ -38,9 +41,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
+from core.stop_flag import stop_event as _stop_event
 _running = True
 
 # Shared pipeline status — read by /api/pipeline-status endpoint
+_adaptive_skip: AdaptiveFrameSkipper = None
+_camera_manager: MultiCameraManager = None
 _pipeline_status: dict = {
     "running": False,
     "source": None,
@@ -132,7 +138,7 @@ def save_thumbnail(face_uuid: str, crop: np.ndarray) -> str:
             face = session.query(Face).filter_by(face_uuid=face_uuid).first()
             if face:
                 face.thumbnail_path = str(thumb_path)
-        return str(thumb_path)
+        return str(thumb_path).replace('\\', '/')
     except Exception as e:
         logger.error(f"Thumbnail save error for {face_uuid}: {e}")
         return ""
@@ -148,6 +154,11 @@ class EventCallbacks:
         self.db = db_logger
         self.frame_ref = frame_ref
         self._last_crops: Dict[int, np.ndarray] = {}
+        self._new_faces: set = set()  # UUIDs registered this session
+
+    def mark_new_face(self, face_uuid: str):
+        """Call from pipeline loop when a face is newly registered."""
+        self._new_faces.add(face_uuid)
 
     def on_entry(self, track: Track, face_uuid: str):
         frame = self.frame_ref.get("frame")
@@ -155,14 +166,15 @@ class EventCallbacks:
         if crop is not None:
             self._last_crops[track.track_id] = crop
 
-        ts = datetime.now(timezone.utc)  # FIX 2
+        ts = datetime.now(timezone.utc)
+        is_new = face_uuid in self._new_faces
         img_path = self.fs.log_entry(face_uuid, crop, timestamp=ts,
                                      confidence=track.confidence,
                                      frame_number=self.frame_ref.get("frame_number", 0))
         self.db.log_entry(face_uuid=face_uuid, image_path=img_path,
                           tracker_id=track.track_id, confidence=track.confidence,
                           frame_number=self.frame_ref.get("frame_number", 0),
-                          bbox=track.bbox, timestamp=ts)
+                          bbox=track.bbox, timestamp=ts, is_new_face=is_new)
         flask_app.emit_face_event("entry", face_uuid, {"dwell": 0})
 
     def on_exit(self, track: Track, face_uuid: str):
@@ -195,13 +207,72 @@ class EventCallbacks:
 # Core pipeline
 # ---------------------------------------------------------------------------
 
-def run_pipeline(config: dict, video_source: Optional[str] = None):
+def _run_multi_camera(config: dict, sources: list, db_logger: DBLogger):
+    """Run multiple video sources in parallel using MultiCameraManager."""
+    from core.multi_camera import MultiCameraManager
+    from core.embedder import FaceEmbedder
+    from core.recognizer import FaceRecognizer
+
+    log_cfg = config["logging"]
+    fs_logger = FSLogger(base_dir=log_cfg["image_base_dir"], log_file=log_cfg["log_file"])
+
+    rec_cfg = config["recognition"]
+    embedder = FaceEmbedder(model_name=rec_cfg["model_name"], ctx_id=-1)
+    recognizer = FaceRecognizer(embedder=embedder,
+                                similarity_threshold=rec_cfg["similarity_threshold"])
+
+    def on_event(cam_id, evt_type, face_uuid, extra):
+        flask_app.emit_face_event(evt_type, face_uuid, {**extra, "camera": cam_id})
+
+    def on_alert(alert_type, message, extra):
+        flask_app.emit_alert(alert_type, message, extra)
+
+    manager = MultiCameraManager(
+        config=config, recognizer=recognizer,
+        db_logger=db_logger, fs_logger=fs_logger,
+        on_event_callback=on_event, on_alert_callback=on_alert,
+    )
+    flask_app.inject_multi_camera_manager(manager)
+
+    for cam in sources:
+        manager.add_camera(cam["camera_id"], cam["path"])
+
+    manager.start_all()
+    logger.info(f"[MultiCam] {len(sources)} cameras running in parallel")
+
+    # Poll and emit status every 2s
+    import time
+    while any(not s["done"] for s in manager.get_status()):
+        flask_app.emit_pipeline_status({
+            "running": True,
+            "cameras": manager.get_status(),
+            "global_unique": manager.global_unique_count,
+            "multi_mode": True,
+        })
+        time.sleep(2)
+
+    flask_app.emit_pipeline_status({
+        "running": False, "done": True, "multi_mode": True,
+        "cameras": manager.get_status(),
+        "global_unique": manager.global_unique_count,
+    })
+    logger.info(f"[MultiCam] All cameras done. Global unique visitors: {manager.global_unique_count}")
+    fs_logger.close()
+
+
+def run_pipeline(config: dict, video_source: Optional[str] = None, multi_sources: Optional[list] = None):
     global _running, _pipeline_status
 
     _running = True
+    _stop_event.clear()
 
     init_db(config)
     db_logger = DBLogger()
+
+    # Multi-camera mode — run all sources in parallel
+    if multi_sources and len(multi_sources) > 1:
+        _run_multi_camera(config, multi_sources, db_logger)
+        return
 
     log_cfg = config["logging"]
     fs_logger = FSLogger(base_dir=log_cfg["image_base_dir"], log_file=log_cfg["log_file"])
@@ -221,6 +292,8 @@ def run_pipeline(config: dict, video_source: Optional[str] = None):
     tracker = FaceTracker(max_age=trk_cfg["max_age"], min_hits=trk_cfg["min_hits"],
                           iou_threshold=trk_cfg["iou_threshold"])
 
+    # Adaptive frame skip
+    global _adaptive_skip
     alert_cfg = config.get("alerts", {})
     frame_ref: dict = {"frame": None, "frame_number": 0}
     callbacks = EventCallbacks(fs_logger, db_logger, frame_ref)
@@ -254,17 +327,32 @@ def run_pipeline(config: dict, video_source: Optional[str] = None):
         writer = cv2.VideoWriter(out_path, fourcc, fps, (frame_w, frame_h))
 
     track_embedding_done: set = set()
+
+    # Adaptive frame skipping — auto-tunes detector.frame_skip
+    adaptive = AdaptiveFrameSkipper(
+        detector=detector,
+        target_fps=25.0,
+        min_skip=1,
+        max_skip=6,
+        cpu_high_threshold=80.0,
+        cpu_low_threshold=40.0,
+    )
+    adaptive.start()
+    flask_app.inject_adaptive_skipper(adaptive)
     frame_number = 0
 
     _pipeline_status.update({"running": True, "source": str(video_source),
                               "progress": 0, "total_frames": total_frames,
                               "unique_visitors": 0, "done": False, "error": None})
 
+    # Emit immediately so frontend shows total_frames right away
+    flask_app.emit_pipeline_status(_pipeline_status)
+
     logger.info("=== Pipeline running. Press Ctrl+C to stop. ===")
     fs_logger.log_system(f"Pipeline started — source: {video_source}")
 
     try:
-        while _running:
+        while _running and not _stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
                 logger.info("End of video stream.")
@@ -273,6 +361,12 @@ def run_pipeline(config: dict, video_source: Optional[str] = None):
             frame_number += 1
             frame_ref["frame"] = frame
             frame_ref["frame_number"] = frame_number
+
+            adaptive.record_frame()  # track FPS for adaptive skip
+            # Adaptive skip: dynamically update detector's frame_skip
+            if _adaptive_skip:
+                new_skip = _adaptive_skip.tick(len(event_router.active_face_uuids))
+                detector.frame_skip = new_skip
 
             detections = detector.detect(frame)
             tracks = tracker.update(detections, frame)
@@ -296,6 +390,7 @@ def run_pipeline(config: dict, video_source: Optional[str] = None):
                 if is_new:
                     fs_logger.log_registration(face_uuid, attributes)
                     save_thumbnail(face_uuid, crop)  # FIX 3
+                    callbacks.mark_new_face(face_uuid)  # tell entry callback it's new
                 else:
                     fs_logger.log_recognition(face_uuid, similarity, track.track_id)
 
@@ -325,6 +420,7 @@ def run_pipeline(config: dict, video_source: Optional[str] = None):
         _pipeline_status["error"] = str(e)
     finally:
         _running = False
+        adaptive.stop()
         cap.release()
         if writer:
             writer.release()
@@ -353,6 +449,7 @@ def _handle_signal(signum, frame):
     global _running
     logger.info(f"Signal {signum} — shutting down.")
     _running = False
+    _stop_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -380,5 +477,12 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=_run_flask, daemon=True)
     flask_thread.start()
     logger.info(f"API server started on http://0.0.0.0:{api_cfg.get('port', 5000)}")
+    logger.info("Waiting for video upload via dashboard. No auto-processing on startup.")
 
-    run_pipeline(config)
+    # Keep main thread alive — pipeline runs only when a video is uploaded via /api/upload
+    try:
+        while True:
+            import time
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down.")

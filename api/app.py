@@ -43,9 +43,11 @@ _pipeline_runner = None
 
 # Track uploaded video history
 _upload_history = []
+_adaptive_skipper = None
+_multi_camera_manager = None
 
 UPLOAD_FOLDER = Path("uploads")
-UPLOAD_FOLDER.mkdir(exist_ok=True)
+UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
@@ -122,8 +124,9 @@ def create_app(config: dict) -> Flask:
         if not _recognizer:
             return jsonify({"error": "not initialised"}), 503
         data = request.json or {}
-        _recognizer.mark_watchlist(face_uuid, data.get("label", ""))
-        return jsonify({"status": "ok", "face_uuid": face_uuid})
+        remove = data.get("remove", False)
+        _recognizer.mark_watchlist(face_uuid, data.get("label", ""), remove=remove)
+        return jsonify({"status": "ok", "face_uuid": face_uuid, "removed": remove})
 
     # -----------------------------------------------------------------------
     # Video upload + processing
@@ -161,6 +164,17 @@ def create_app(config: dict) -> Flask:
             "size_mb": round(save_path.stat().st_size / 1024 / 1024, 2),
         })
 
+        # Reset pipeline status so frontend shows fresh progress
+        emit_pipeline_status({"running": False, "done": False, "progress": 0,
+                               "total_frames": 0, "unique_visitors": 0, "error": None})
+
+        # Reset stop flag so pipeline can run again after a stop
+        try:
+            from core.stop_flag import stop_event
+            stop_event.clear()
+        except Exception:
+            pass
+
         # Run pipeline in background thread so API stays responsive
         def _run():
             try:
@@ -179,6 +193,56 @@ def create_app(config: dict) -> Flask:
             "message": "Processing started. Watch pipeline_status WebSocket event for progress.",
         })
 
+    @app.route("/api/clear", methods=["POST"])
+    def clear_data():
+        """Clear all face data from DB and reset in-memory state for a fresh run."""
+        try:
+            from db.session import init_db, session_scope
+            init_db()  # ensure DB is initialised before clearing
+            from db.session import session_scope
+            from db.models import Face, FaceEvent, DwellRecord, SystemAlert, VisitorStats
+            with session_scope() as session:
+                session.query(DwellRecord).delete()
+                session.query(FaceEvent).delete()
+                session.query(SystemAlert).delete()
+                session.query(VisitorStats).delete()
+                session.query(Face).delete()
+            # Clear in-memory gallery
+            if _recognizer:
+                _recognizer._gallery.clear()
+            # Reset pipeline status
+            try:
+                import main as main_module
+                main_module._pipeline_status.update({
+                    "running": False, "source": None, "progress": 0,
+                    "total_frames": 0, "unique_visitors": 0,
+                    "done": False, "error": None,
+                })
+            except Exception:
+                pass
+            # Notify frontend via WebSocket
+            emit_pipeline_status({"running": False, "done": False,
+                                   "cleared": True, "unique_visitors": 0})
+            emit_stats(0, 0)
+            logger.info("Database cleared via API.")
+            return jsonify({"status": "cleared"})
+        except Exception as e:
+            logger.error(f"Clear error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/api/stop", methods=["POST"])
+    def stop_pipeline():
+        try:
+            from core.stop_flag import stop_event
+            stop_event.set()
+            logger.info("Pipeline stop requested via API.")
+            # Emit stopped — NOT done:True so frontend doesn't show 100%
+            emit_pipeline_status({"running": False, "done": False,
+                                   "stopped": True, "error": "Stopped by user"})
+        except Exception as e:
+            logger.error(f"Stop error: {e}")
+        return jsonify({"status": "stopped"})
+
     @app.route("/api/pipeline-status")
     def pipeline_status():
         """Current pipeline progress — also emitted via WebSocket."""
@@ -189,6 +253,53 @@ def create_app(config: dict) -> Flask:
     def upload_history():
         return jsonify(_upload_history)
 
+
+    @app.route("/api/adaptive-skip")
+    def adaptive_skip():
+        if _adaptive_skipper is None:
+            return jsonify({"error": "not running"})
+        return jsonify(_adaptive_skipper.get_stats())
+
+    @app.route("/api/cameras")
+    def cameras():
+        if _multi_camera_manager is None:
+            return jsonify([])
+        return jsonify(_multi_camera_manager.get_status())
+
+    @app.route("/api/cameras/global-count")
+    def global_count():
+        if _multi_camera_manager is None:
+            return jsonify({"global_unique": 0})
+        return jsonify({"global_unique": _multi_camera_manager.global_unique_count})
+
+    @app.route("/api/multi-upload", methods=["POST"])
+    def multi_upload():
+        if _pipeline_runner is None or _config is None:
+            return jsonify({"error": "Pipeline not ready"}), 503
+        files = request.files.getlist("videos")
+        if not files:
+            return jsonify({"error": "No video files provided"}), 400
+        saved = []
+        for i, f in enumerate(files):
+            ext = Path(f.filename).suffix.lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                continue
+            save_path = UPLOAD_FOLDER / f"multicam_{len(_upload_history):04d}_{i}{ext}"
+            f.save(str(save_path))
+            saved.append({"camera_id": f"cam_{i+1:02d}", "path": str(save_path), "filename": f.filename})
+            _upload_history.append({"filename": f.filename, "saved_as": str(save_path),
+                                    "size_mb": round(save_path.stat().st_size / 1024 / 1024, 2)})
+        if not saved:
+            return jsonify({"error": "No valid video files"}), 400
+        def _run():
+            try:
+                _pipeline_runner(_config, multi_sources=saved)
+            except Exception as e:
+                logger.error(f"Multi-camera pipeline error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"status": "started", "cameras": saved,
+                        "message": f"{len(saved)} camera streams started."})
+
     # -----------------------------------------------------------------------
     # Serve log images
     # -----------------------------------------------------------------------
@@ -196,7 +307,15 @@ def create_app(config: dict) -> Flask:
     @app.route("/logs/<path:filename>")
     def serve_log_image(filename):
         logs_dir = Path(__file__).parent.parent / "logs"
-        return send_from_directory(str(logs_dir), filename)
+        # Normalize Windows backslashes to forward slashes
+        filename = filename.replace('\\', '/').replace('\\', '/')
+        # Security: prevent path traversal
+        safe_path = logs_dir / filename
+        try:
+            return send_from_directory(str(logs_dir), filename)
+        except Exception:
+            from flask import abort
+            abort(404)
 
     # -----------------------------------------------------------------------
     # Serve React SPA
@@ -230,6 +349,16 @@ def inject_dependencies(db_logger, recognizer, event_router):
 def inject_config(config: dict):
     global _config
     _config = config
+
+
+def inject_adaptive_skipper(skipper):
+    global _adaptive_skipper
+    _adaptive_skipper = skipper
+
+
+def inject_multi_camera_manager(manager):
+    global _multi_camera_manager
+    _multi_camera_manager = manager
 
 
 def inject_pipeline_runner(runner):

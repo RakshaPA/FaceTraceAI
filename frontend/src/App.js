@@ -20,10 +20,20 @@ const TABS = [
 export default function App() {
   const [tab, setTab] = useState('upload');
   const [connected, setConnected] = useState(false);
+  const [darkMode, setDarkMode] = useState(true);
   const [liveStats, setLiveStats] = useState({ unique_visitors: 0, current_occupancy: 0 });
   const [recentEvents, setRecentEvents] = useState([]);
-  const [pipelineStatus, setPipelineStatus] = useState({ running: false, done: false, progress: 0, total_frames: 0 });
+  const [pipelineStatus, setPipelineStatus] = useState({
+    running: false, done: false, progress: 0, total_frames: 0, unique_visitors: 0
+  });
   const socketRef = useRef(null);
+  // Throttle face toasts — max 1 per second
+  const lastToastTime = useRef(0);
+
+  useEffect(() => {
+    // Apply theme to root
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+  }, [darkMode]);
 
   useEffect(() => {
     const socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
@@ -31,29 +41,45 @@ export default function App() {
 
     socket.on('connect', () => {
       setConnected(true);
-      toast.success('🟢 Connected to tracker', { autoClose: 2000 });
+      toast.success('🟢 Connected to FaceTraceAI', { autoClose: 2000 });
     });
     socket.on('disconnect', () => {
       setConnected(false);
       toast.error('🔴 Disconnected');
     });
     socket.on('stats', (data) => setLiveStats(data));
+
     socket.on('face_event', (data) => {
       setRecentEvents(prev => [
         { ...data, timestamp: new Date().toISOString(), id: Date.now() },
         ...prev.slice(0, 49),
       ]);
-      const icon = data.event_type === 'entry' ? '🟢' : '🔴';
-      toast.info(`${icon} Face ${data.event_type}: ...${data.face_uuid?.slice(-6)}`,
-        { autoClose: 2500, position: 'bottom-right' });
+      // Throttle toasts — max 1 per 2 seconds to avoid spam
+      const now = Date.now();
+      if (now - lastToastTime.current > 2000) {
+        lastToastTime.current = now;
+        const icon = data.event_type === 'entry' ? '🟢' : '🔴';
+        toast.info(`${icon} Face ${data.event_type}: ...${data.face_uuid?.slice(-6)}`,
+          { autoClose: 2000, position: 'bottom-right' });
+      }
     });
+
     socket.on('alert', (data) => {
-      toast.warning(`⚠️ ${data.message}`, { autoClose: 5000 });
+      toast.warning(`⚠️ ${data.message}`, { autoClose: 4000 });
     });
+
     socket.on('pipeline_status', (data) => {
+      // If DB was cleared, reset all local state
+      if (data.cleared) {
+        setRecentEvents([]);
+        setLiveStats({ unique_visitors: 0, current_occupancy: 0 });
+        setPipelineStatus({ running: false, done: false, progress: 0,
+          total_frames: 0, unique_visitors: 0 });
+        return;
+      }
       setPipelineStatus(data);
       if (data.done && !data.error) {
-        toast.success(`✅ Processing complete! ${data.unique_visitors} unique visitors`, { autoClose: 5000 });
+        toast.success(`✅ Done! ${data.unique_visitors} unique visitors`, { autoClose: 5000 });
         setTab('dashboard');
       }
       if (data.error) {
@@ -69,12 +95,12 @@ export default function App() {
     : 0;
 
   return (
-    <div className="app">
+    <div className={`app ${darkMode ? '' : 'light-mode'}`}>
       <aside className="sidebar">
         <div className="logo">
-          <span className="logo-icon">👁️</span>
+          <span className="logo-icon">🎯</span>
           <div>
-            <div className="logo-title">FaceTracker</div>
+            <div className="logo-title">FaceTraceAI</div>
             <div className="logo-sub">AI Visitor Counter</div>
           </div>
         </div>
@@ -90,7 +116,7 @@ export default function App() {
         </nav>
 
         <div className="sidebar-stats">
-          {/* Pipeline progress bar */}
+          {/* Processing progress bar */}
           {pipelineStatus.running && (
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
@@ -98,7 +124,7 @@ export default function App() {
               </div>
               <div style={{ height: 6, background: 'var(--border)', borderRadius: 3 }}>
                 <div style={{ height: 6, width: `${pct}%`, background: 'var(--accent-blue)',
-                              borderRadius: 3, transition: 'width 0.5s' }} />
+                  borderRadius: 3, transition: 'width 0.5s' }} />
               </div>
             </div>
           )}
@@ -111,7 +137,29 @@ export default function App() {
             <span className="stat-label">In Frame Now</span>
             <span className="stat-val blue">{liveStats.current_occupancy}</span>
           </div>
-          <div className="conn-status">
+
+          {/* Dark/Light mode toggle */}
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center',
+            justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              {darkMode ? '🌙 Dark' : '☀️ Light'}
+            </span>
+            <div onClick={() => setDarkMode(!darkMode)}
+              style={{
+                width: 44, height: 24, borderRadius: 12, cursor: 'pointer',
+                background: darkMode ? 'var(--accent-blue)' : '#e2e8f0',
+                position: 'relative', transition: 'background 0.3s',
+              }}>
+              <div style={{
+                width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                position: 'absolute', top: 3,
+                left: darkMode ? 23 : 3,
+                transition: 'left 0.3s',
+              }} />
+            </div>
+          </div>
+
+          <div className="conn-status" style={{ marginTop: 8 }}>
             <span className={`status-dot ${connected ? 'online' : 'offline'}`} />
             {connected ? 'Live' : 'Offline'}
           </div>
@@ -126,7 +174,8 @@ export default function App() {
         {tab === 'alerts'    && <Alerts />}
       </main>
 
-      <ToastContainer position="bottom-right" theme="dark" />
+      <ToastContainer position="bottom-right" theme={darkMode ? 'dark' : 'light'}
+        limit={3} />
     </div>
   );
 }

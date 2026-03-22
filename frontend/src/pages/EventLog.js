@@ -10,7 +10,7 @@ export default function EventLog({ recentEvents }) {
   const fetchEvents = async () => {
     try {
       const res = await axios.get('/api/events?limit=200');
-      setDbEvents(res.data);
+      setDbEvents(res.data);  // always overwrite with fresh DB data
     } catch (e) {}
     setLoading(false);
   };
@@ -21,10 +21,14 @@ export default function EventLog({ recentEvents }) {
     return () => clearInterval(t);
   }, []);
 
-  // Merge live events with DB events (live first, dedup by id)
+  // DB is source of truth — live events are only shown if not yet in DB
   const allEvents = [...dbEvents];
   recentEvents.forEach(live => {
-    if (!allEvents.find(e => e.face_uuid === live.face_uuid && Math.abs(new Date(e.timestamp) - new Date(live.timestamp)) < 2000)) {
+    const alreadyInDb = allEvents.find(e =>
+      e.face_uuid === live.face_uuid &&
+      Math.abs(new Date(e.timestamp) - new Date(live.timestamp)) < 3000
+    );
+    if (!alreadyInDb) {
       allEvents.unshift({ ...live, source: 'live' });
     }
   });
@@ -109,12 +113,16 @@ export default function EventLog({ recentEvents }) {
                     <td>
                       {ev.image_path ? (
                         <img
-                          src={`/logs/${ev.image_path.split('/logs/')[1] || ev.image_path}`}
+                          src={`/logs/${ev.image_path.replace(/\\/g, '/').replace(/.*logs\//, '')}`}
                           alt="crop"
-                          style={{ width: 36, height: 36, borderRadius: 4, objectFit: 'cover', border: '1px solid var(--border)' }}
-                          onError={e => { e.target.style.display = 'none'; }}
+                          style={{ width: 40, height: 40, borderRadius: 6, objectFit: 'cover',
+                            border: '1px solid var(--border)', cursor: 'pointer' }}
+                          onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'inline'; }}
+                          title={ev.image_path}
                         />
-                      ) : <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
+                      ) : null}
+                      <span style={{ color: 'var(--text-muted)', fontSize: 11,
+                        display: ev.image_path ? 'none' : 'inline' }}>—</span>
                     </td>
                   </tr>
                 ))}
