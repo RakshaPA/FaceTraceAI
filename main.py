@@ -21,10 +21,8 @@ from typing import Dict, Optional
 import cv2
 import numpy as np
 
-from core.multi_camera import MultiCameraManager, CameraConfig
 from core.detector import FaceDetector
 from core.adaptive_skip import AdaptiveFrameSkipper
-from core.multi_camera import MultiCameraManager
 from core.embedder import FaceEmbedder
 from core.event_router import EventRouter
 from core.recognizer import FaceRecognizer
@@ -46,7 +44,6 @@ _running = True
 
 # Shared pipeline status — read by /api/pipeline-status endpoint
 _adaptive_skip: AdaptiveFrameSkipper = None
-_camera_manager: MultiCameraManager = None
 _pipeline_status: dict = {
     "running": False,
     "source": None,
@@ -207,58 +204,6 @@ class EventCallbacks:
 # Core pipeline
 # ---------------------------------------------------------------------------
 
-def _run_multi_camera(config: dict, sources: list, db_logger: DBLogger):
-    """Run multiple video sources in parallel using MultiCameraManager."""
-    from core.multi_camera import MultiCameraManager
-    from core.embedder import FaceEmbedder
-    from core.recognizer import FaceRecognizer
-
-    log_cfg = config["logging"]
-    fs_logger = FSLogger(base_dir=log_cfg["image_base_dir"], log_file=log_cfg["log_file"])
-
-    rec_cfg = config["recognition"]
-    embedder = FaceEmbedder(model_name=rec_cfg["model_name"], ctx_id=-1)
-    recognizer = FaceRecognizer(embedder=embedder,
-                                similarity_threshold=rec_cfg["similarity_threshold"])
-
-    def on_event(cam_id, evt_type, face_uuid, extra):
-        flask_app.emit_face_event(evt_type, face_uuid, {**extra, "camera": cam_id})
-
-    def on_alert(alert_type, message, extra):
-        flask_app.emit_alert(alert_type, message, extra)
-
-    manager = MultiCameraManager(
-        config=config, recognizer=recognizer,
-        db_logger=db_logger, fs_logger=fs_logger,
-        on_event_callback=on_event, on_alert_callback=on_alert,
-    )
-    flask_app.inject_multi_camera_manager(manager)
-
-    for cam in sources:
-        manager.add_camera(cam["camera_id"], cam["path"])
-
-    manager.start_all()
-    logger.info(f"[MultiCam] {len(sources)} cameras running in parallel")
-
-    # Poll and emit status every 2s
-    import time
-    while any(not s["done"] for s in manager.get_status()):
-        flask_app.emit_pipeline_status({
-            "running": True,
-            "cameras": manager.get_status(),
-            "global_unique": manager.global_unique_count,
-            "multi_mode": True,
-        })
-        time.sleep(2)
-
-    flask_app.emit_pipeline_status({
-        "running": False, "done": True, "multi_mode": True,
-        "cameras": manager.get_status(),
-        "global_unique": manager.global_unique_count,
-    })
-    logger.info(f"[MultiCam] All cameras done. Global unique visitors: {manager.global_unique_count}")
-    fs_logger.close()
-
 
 def run_pipeline(config: dict, video_source: Optional[str] = None, multi_sources: Optional[list] = None):
     global _running, _pipeline_status
@@ -268,11 +213,6 @@ def run_pipeline(config: dict, video_source: Optional[str] = None, multi_sources
 
     init_db(config)
     db_logger = DBLogger()
-
-    # Multi-camera mode — run all sources in parallel
-    if multi_sources and len(multi_sources) > 1:
-        _run_multi_camera(config, multi_sources, db_logger)
-        return
 
     log_cfg = config["logging"]
     fs_logger = FSLogger(base_dir=log_cfg["image_base_dir"], log_file=log_cfg["log_file"])
