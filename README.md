@@ -6,7 +6,7 @@
 
 ##  Demo Video
 
-[> **[Add your Loom / YouTube link here]**](https://drive.google.com/file/d/11aicfIn-jv52KZ3Rer3Am6BV8yTZ5AN9/view?usp=sharing)
+https://drive.google.com/file/d/11aicfIn-jv52KZ3Rer3Am6BV8yTZ5AN9/view?usp=sharing
 https://1drv.ms/v/c/0f55c946cdfb8cbf/IQDrQk2YBsqHSpdNqFWoAa76AfKfAVjuoLwnTSU9_Jc9Rdc?e=8CEjZI
 
 ---
